@@ -4,44 +4,16 @@ if defined?(ActiveRecord::Base)
       module ActiveRecord
         def self.extended(base) # :nodoc:
           base.class_eval do
-
-            # https://github.com/attr-encrypted/attr_encrypted/issues/68
-            def reload_with_attr_encrypted(*args, &block)
-              result = reload_without_attr_encrypted(*args, &block)
-              self.class.encrypted_attributes.keys.each do |attribute_name|
-                instance_variable_set("@#{attribute_name}", nil)
-              end
-              result
-            end
-            alias_method_chain :reload, :attr_encrypted
-
             attr_encrypted_options[:encode] = true
-            class << self
-              alias_method :attr_encryptor, :attr_encrypted
-              alias_method_chain :method_missing, :attr_encrypted
-              alias_method :undefine_attribute_methods, :reset_column_information if ::ActiveRecord::VERSION::STRING < "3"
-            end
+            class << self; alias_method_chain :method_missing, :attr_encrypted; end
 
-            def perform_attribute_assignment(method, new_attributes, *args)
-              return if new_attributes.blank?
-              attributes = new_attributes.respond_to?(:with_indifferent_access) ? new_attributes.with_indifferent_access : new_attributes.symbolize_keys
+            def assign_attributes_with_attr_encrypted(*args)
+              attributes = args.shift
               encrypted_attributes = self.class.encrypted_attributes.keys
-              self.send method, attributes.except(*encrypted_attributes), *args
-              self.send method, attributes.slice(*encrypted_attributes), *args
+              assign_attributes_without_attr_encrypted attributes.except(*encrypted_attributes)
+              assign_attributes_without_attr_encrypted attributes.slice(*encrypted_attributes)
             end
-            private :perform_attribute_assignment
-
-            if ::ActiveRecord::VERSION::STRING < "3.0" || ::ActiveRecord::VERSION::STRING > "3.1"
-              def assign_attributes_with_attr_encrypted(*args)
-                perform_attribute_assignment :assign_attributes_without_attr_encrypted, *args
-              end
-              alias_method_chain :assign_attributes, :attr_encrypted
-            else
-              def attributes_with_attr_encrypted=(*args)
-                perform_attribute_assignment :attributes_without_attr_encrypted=, *args
-              end
-              alias_method_chain :attributes=, :attr_encrypted
-            end
+            alias_method_chain :assign_attributes, :attr_encrypted
           end
         end
 
@@ -53,7 +25,22 @@ if defined?(ActiveRecord::Base)
             define_attribute_methods rescue nil
             super
             undefine_attribute_methods
-            attrs.reject { |attr| attr.is_a?(Hash) }.each { |attr| alias_method "#{attr}_before_type_cast", attr }
+            attrs.reject { |attr| attr.is_a?(Hash) }.each { |attr|
+              alias_method "#{attr}_before_type_cast", attr
+              # Simulate ActiveRecord dirty methods
+              encrypted_attr = encrypted_attributes[attr.to_sym][:attribute]
+              class_eval <<-EOS
+              def #{attr}_was
+                #{encrypted_attr}_was.nil? ? nil : decrypt(:#{attr}, #{encrypted_attr}_was)
+              end
+              def #{attr}_change
+                [#{attr}_was, __send__(:#{attr})] if #{encrypted_attr}_changed?
+              end
+              def #{attr}_changed?
+                #{encrypted_attr}_changed?
+              end
+              EOS
+            }
           end
 
           # Allows you to use dynamic methods like <tt>find_by_email</tt> or <tt>scoped_by_email</tt> for 
