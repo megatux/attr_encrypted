@@ -4,16 +4,44 @@ if defined?(ActiveRecord::Base)
       module ActiveRecord
         def self.extended(base) # :nodoc:
           base.class_eval do
-            attr_encrypted_options[:encode] = true
-            class << self; alias_method_chain :method_missing, :attr_encrypted; end
 
-            def assign_attributes_with_attr_encrypted(*args)
-              attributes = args.shift
-              encrypted_attributes = self.class.encrypted_attributes.keys
-              assign_attributes_without_attr_encrypted attributes.except(*encrypted_attributes)
-              assign_attributes_without_attr_encrypted attributes.slice(*encrypted_attributes)
+            # https://github.com/attr-encrypted/attr_encrypted/issues/68
+            def reload_with_attr_encrypted(*args, &block)
+              result = reload_without_attr_encrypted(*args, &block)
+              self.class.encrypted_attributes.keys.each do |attribute_name|
+                instance_variable_set("@#{attribute_name}", nil)
+              end
+              result
             end
-            alias_method_chain :assign_attributes, :attr_encrypted
+            alias_method_chain :reload, :attr_encrypted
+
+            attr_encrypted_options[:encode] = true
+            class << self
+              alias_method :attr_encryptor, :attr_encrypted
+              alias_method_chain :method_missing, :attr_encrypted
+              alias_method :undefine_attribute_methods, :reset_column_information if ::ActiveRecord::VERSION::STRING < "3"
+            end
+
+            def perform_attribute_assignment(method, new_attributes, *args)
+              return if new_attributes.blank?
+              attributes = new_attributes.respond_to?(:with_indifferent_access) ? new_attributes.with_indifferent_access : new_attributes.symbolize_keys
+              encrypted_attributes = self.class.encrypted_attributes.keys
+              self.send method, attributes.except(*encrypted_attributes)
+              self.send method, attributes.slice(*encrypted_attributes)
+            end
+            private :perform_attribute_assignment
+
+            if ::ActiveRecord::VERSION::STRING < "3.0" || ::ActiveRecord::VERSION::STRING > "3.1"
+              def assign_attributes_with_attr_encrypted(*args)
+                perform_attribute_assignment :assign_attributes_without_attr_encrypted, *args
+              end
+              alias_method_chain :assign_attributes, :attr_encrypted
+            else
+              def attributes_with_attr_encrypted=(*args)
+                perform_attribute_assignment :attributes_without_attr_encrypted=, *args
+              end
+              alias_method_chain :attributes=, :attr_encrypted
+            end
           end
         end
 

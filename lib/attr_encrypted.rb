@@ -1,3 +1,4 @@
+require 'attr_encrypted/railtie' if defined? Rails
 require 'encryptor'
 
 # Adds attr_accessors that encrypt and decrypt an object's attributes
@@ -124,23 +125,25 @@ module AttrEncrypted
 
     attributes.each do |attribute|
       encrypted_attribute_name = (options[:attribute] ? options[:attribute] : [options[:prefix], attribute, options[:suffix]].join).to_sym
+      iv_name = "#{encrypted_attribute_name}_iv".to_sym
+      salt_name = "#{encrypted_attribute_name}_salt".to_sym
 
       instance_methods_as_symbols = instance_methods.collect { |method| method.to_sym }
       attr_reader encrypted_attribute_name unless instance_methods_as_symbols.include?(encrypted_attribute_name)
       attr_writer encrypted_attribute_name unless instance_methods_as_symbols.include?(:"#{encrypted_attribute_name}=")
 
       if options[:mode] == :per_attribute_iv_and_salt
-        attr_reader (encrypted_attribute_name.to_s + "_iv").to_sym unless instance_methods_as_symbols.include?((encrypted_attribute_name.to_s + "_iv").to_sym )
-        attr_writer (encrypted_attribute_name.to_s + "_iv").to_sym unless instance_methods_as_symbols.include?((encrypted_attribute_name.to_s + "_iv").to_sym )
+        attr_reader iv_name unless instance_methods_as_symbols.include?(iv_name)
+        attr_writer iv_name unless instance_methods_as_symbols.include?(:"#{iv_name}=")
 
-        attr_reader (encrypted_attribute_name.to_s + "_salt").to_sym unless instance_methods_as_symbols.include?((encrypted_attribute_name.to_s + "_salt").to_sym )
-        attr_writer (encrypted_attribute_name.to_s + "_salt").to_sym unless instance_methods_as_symbols.include?((encrypted_attribute_name.to_s + "_salt").to_sym )
+        attr_reader salt_name unless instance_methods_as_symbols.include?(salt_name)
+        attr_writer salt_name unless instance_methods_as_symbols.include?(:"#{salt_name}=")
       end
 
       define_method(attribute) do
         if options[:mode] == :per_attribute_iv_and_salt
-          load_iv_for_attribute(attribute,encrypted_attribute_name, options[:algorithm])
-          load_salt_for_attribute(attribute,encrypted_attribute_name)
+          load_iv_for_attribute(attribute, options[:algorithm])
+          load_salt_for_attribute(attribute)
         end
 
         instance_variable_get("@#{attribute}") || instance_variable_set("@#{attribute}", decrypt(attribute, send(encrypted_attribute_name)))
@@ -148,8 +151,8 @@ module AttrEncrypted
 
       define_method("#{attribute}=") do |value|
         if options[:mode] == :per_attribute_iv_and_salt
-          load_iv_for_attribute(attribute, encrypted_attribute_name, options[:algorithm])
-          load_salt_for_attribute(attribute, encrypted_attribute_name)
+          load_iv_for_attribute(attribute, options[:algorithm])
+          load_salt_for_attribute(attribute)
         end
 
         send("#{encrypted_attribute_name}=", encrypt(attribute, value))
@@ -326,22 +329,24 @@ module AttrEncrypted
         end
       end
 
-      def load_iv_for_attribute (attribute, encrypted_attribute_name, algorithm)
-        iv = send("#{encrypted_attribute_name.to_s + "_iv"}")
-          if(iv == nil)
-            begin
-              algorithm = algorithm || "aes-256-cbc"
-              algo = OpenSSL::Cipher::Cipher.new(algorithm)
-              iv = [algo.random_iv].pack("m")
-              send("#{encrypted_attribute_name.to_s + "_iv"}=", iv)
-            rescue RuntimeError
-            end
+      def load_iv_for_attribute(attribute, algorithm)
+        encrypted_attribute_name = self.class.encrypted_attributes[attribute.to_sym][:attribute]
+        iv = send("#{encrypted_attribute_name}_iv")
+        if(iv == nil)
+          begin
+            algorithm = algorithm || "aes-256-cbc"
+            algo = OpenSSL::Cipher::Cipher.new(algorithm)
+            iv = [algo.random_iv].pack("m")
+            send("#{encrypted_attribute_name}_iv=", iv)
+          rescue RuntimeError
           end
+        end
         self.class.encrypted_attributes[attribute.to_sym] = self.class.encrypted_attributes[attribute.to_sym].merge(:iv => iv.unpack("m").first) if (iv && !iv.empty?)
       end
 
-      def load_salt_for_attribute(attribute, encrypted_attribute_name)
-        salt = send("#{encrypted_attribute_name.to_s + "_salt"}") || send("#{encrypted_attribute_name.to_s + "_salt"}=", Digest::SHA256.hexdigest((Time.now.to_i * rand(1000)).to_s)[0..15])
+      def load_salt_for_attribute(attribute)
+        encrypted_attribute_name = self.class.encrypted_attributes[attribute.to_sym][:attribute]
+        salt = send("#{encrypted_attribute_name}_salt") || send("#{encrypted_attribute_name}_salt=", Digest::SHA256.hexdigest((Time.now.to_i * rand(1000)).to_s)[0..15])
         self.class.encrypted_attributes[attribute.to_sym] = self.class.encrypted_attributes[attribute.to_sym].merge(:salt => salt)
       end
   end
